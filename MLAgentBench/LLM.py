@@ -2,10 +2,14 @@
 
 import os
 from functools import partial
+from pathlib import Path
 import tiktoken
+
 from .schema import TooLongPromptError, LLMError
 
 enc = tiktoken.get_encoding("cl100k_base")
+
+CRFM_AVAILABLE = True
 
 try:
     from helm.common.authentication import Authentication
@@ -19,6 +23,8 @@ try:
 except Exception as e:
     print(e)
     print("Could not load CRFM API key crfm_api_key.txt.")
+    Authentication = Request = RequestResult = Account = RemoteService = None
+    CRFM_AVAILABLE = False
 
 try:   
     import anthropic
@@ -27,16 +33,75 @@ try:
 except Exception as e:
     print(e)
     print("Could not load anthropic API key claude_api_key.txt.")
-    
-try:
-    import openai
-    # setup OpenAI API key
-    openai.organization, openai.api_key  =  open("openai_api_key.txt").read().strip().split(":")    
-    os.environ["OPENAI_API_KEY"] = openai.api_key 
-except Exception as e:
-    print(e)
-    print("Could not load OpenAI API key openai_api_key.txt.")
+    anthropic = None
+    anthropic_client = None
 
+
+def _build_openai_client():
+    """Initialize an OpenAI client that optionally targets an alternate base URL (e.g. OpenRouter)."""
+    from openai import OpenAI  # import lazily so missing package errors surface clearly
+
+    client_kwargs = {}
+    api_key = None
+
+    key_path = Path("openai_api_key.txt")
+    try:
+        content = key_path.read_text().strip()
+        if ":" in content:
+            organization, api_key = content.split(":", 1)
+            if organization and organization != "org":
+                client_kwargs["organization"] = organization
+        else:
+            api_key = content
+    except Exception as e:
+        print(e)
+        print("Could not load OpenAI API key openai_api_key.txt.")
+        api_key = os.environ.get("OPENAI_API_KEY")
+
+    if not api_key:
+        raise RuntimeError("No OpenAI API key found in openai_api_key.txt or OPENAI_API_KEY env var.")
+
+    os.environ["OPENAI_API_KEY"] = api_key
+    client_kwargs["api_key"] = api_key
+
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    if base_url:
+        client_kwargs["base_url"] = base_url.rstrip("/")
+
+        # OpenRouter recommends sending these headers; provide sensible defaults
+        default_headers = {}
+        http_referer = (
+            os.environ.get("OPENAI_HTTP_REFERER")
+            or os.environ.get("OPENROUTER_HTTP_REFERER")
+            or os.environ.get("HTTP_REFERER")
+        )
+        if not http_referer and "openrouter.ai" in base_url:
+            http_referer = "https://github.com/dimostzim/biomlbench"
+        if http_referer:
+            default_headers["HTTP-Referer"] = http_referer
+
+        x_title = (
+            os.environ.get("OPENAI_X_TITLE")
+            or os.environ.get("OPENROUTER_X_TITLE")
+        )
+        if not x_title and "openrouter.ai" in base_url:
+            x_title = "BioMLBench Agent"
+        if x_title:
+            default_headers["X-Title"] = x_title
+
+        if default_headers:
+            client_kwargs["default_headers"] = default_headers
+
+    return OpenAI(**client_kwargs)
+
+
+try:
+    openai_client = _build_openai_client()
+    print("[DEBUG] OpenAI client created successfully")
+except Exception as e:
+    print(f"[DEBUG] Failed to create OpenAI client: {e}")
+    openai_client = None
+    
 try:
     import vertexai
     from vertexai.preview.generative_models import GenerativeModel, Part
@@ -68,10 +133,12 @@ class StopAtSpecificTokenCriteria(StoppingCriteria):
     
 def log_to_file(log_file, prompt, completion, model, max_tokens_to_sample):
     """ Log the prompt and completion to a file."""
+    human_prompt = anthropic.HUMAN_PROMPT if anthropic else "Human:"
+    ai_prompt = anthropic.AI_PROMPT if anthropic else "Assistant:"
     with open(log_file, "a") as f:
         f.write("\n===================prompt=====================\n")
-        f.write(f"{anthropic.HUMAN_PROMPT} {prompt} {anthropic.AI_PROMPT}")
-        num_prompt_tokens = len(enc.encode(f"{anthropic.HUMAN_PROMPT} {prompt} {anthropic.AI_PROMPT}"))
+        f.write(f"{human_prompt} {prompt} {ai_prompt}")
+        num_prompt_tokens = len(enc.encode(f"{human_prompt} {prompt} {ai_prompt}"))
         f.write(f"\n==================={model} response ({max_tokens_to_sample})=====================\n")
         f.write(completion)
         num_sample_tokens = len(enc.encode(completion))
@@ -137,14 +204,17 @@ def complete_text_gemini(prompt, stop_sequences=[], model="gemini-pro", max_toke
         log_to_file(log_file, prompt, completion, model, max_tokens_to_sample)
     return completion
 
-def complete_text_claude(prompt, stop_sequences=[anthropic.HUMAN_PROMPT], model="claude-v1", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, messages=None, **kwargs):
+def complete_text_claude(prompt, stop_sequences=None, model="claude-v1", max_tokens_to_sample = 2000, temperature=0.5, log_file=None, messages=None, **kwargs):
     """ Call the Claude API to complete a prompt."""
 
-    ai_prompt = anthropic.AI_PROMPT
-    if "ai_prompt" in kwargs is not None:
-        ai_prompt = kwargs["ai_prompt"]
+    if stop_sequences is None:
+        if anthropic is None:
+            raise LLMError("Anthropic client is not initialized.")
+        stop_sequences = [anthropic.HUMAN_PROMPT]
 
-    
+    ai_prompt = kwargs.get("ai_prompt", anthropic.AI_PROMPT if anthropic else "")
+
+   
     try:
         if model == "claude-3-opus-20240229":
             while True:
@@ -200,6 +270,9 @@ def get_embedding_crfm(text, model="openai/gpt-4-0314"):
     
 def complete_text_crfm(prompt="", stop_sequences = [], model="openai/gpt-4-0314",  max_tokens_to_sample=2000, temperature = 0.5, log_file=None, messages = None, **kwargs):
     
+    if not (CRFM_AVAILABLE and Request is not None):
+        raise LLMError("CRFM API unavailable (missing dependencies or credentials).")
+    
     random = log_file
     if messages:
         request = Request(
@@ -242,6 +315,12 @@ def complete_text_crfm(prompt="", stop_sequences = [], model="openai/gpt-4-0314"
 
 def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_tokens_to_sample=500, temperature=0.2, log_file=None, **kwargs):
     """ Call the OpenAI API to complete a prompt."""
+    if openai_client is None:
+        raise LLMError("OpenAI client is not initialized.")
+
+    is_openrouter = "openrouter.ai" in (os.environ.get("OPENAI_BASE_URL") or "")
+    is_chat_model = model.startswith("gpt-") or "/" in model
+
     raw_request = {
           "model": model,
           "temperature": temperature,
@@ -249,13 +328,42 @@ def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_t
           "stop": stop_sequences or None,  # API doesn't like empty list
           **kwargs
     }
-    if model.startswith("gpt-3.5") or model.startswith("gpt-4"):
+
+    # GPT-5 family ignores temperature/stop overrides
+    if model.startswith("gpt-5"):
+        raw_request["temperature"] = None
+        raw_request["stop"] = None
+
+    if is_chat_model:
         messages = [{"role": "user", "content": prompt}]
-        response = openai.ChatCompletion.create(**{"messages": messages,**raw_request})
-        completion = response["choices"][0]["message"]["content"]
+        if model.startswith("gpt-5") and not is_openrouter:
+            response = openai_client.chat.completions.create(
+                model=raw_request["model"],
+                messages=messages,
+                max_completion_tokens=raw_request["max_tokens"],
+            )
+        else:
+            response = openai_client.chat.completions.create(
+                model=raw_request["model"],
+                messages=messages,
+                temperature=raw_request["temperature"] if raw_request["temperature"] is not None else 1.0,
+                max_tokens=raw_request["max_tokens"],
+                stop=raw_request["stop"],
+            )
+        completion = (response.choices[0].message.content or "") if response.choices else ""
     else:
-        response = openai.Completion.create(**{"prompt": prompt,**raw_request})
-        completion = response["choices"][0]["text"]
+        response = openai_client.completions.create(
+            model=raw_request["model"],
+            prompt=prompt,
+            temperature=raw_request["temperature"],
+            max_tokens=raw_request["max_tokens"],
+            stop=raw_request["stop"],
+        )
+        completion = (response.choices[0].text or "") if response.choices else ""
+
+    if not completion:
+        raise LLMError("Empty completion from model")
+
     if log_file is not None:
         log_to_file(log_file, prompt, completion, model, max_tokens_to_sample)
     return completion
@@ -263,8 +371,12 @@ def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_t
 def complete_text(prompt, log_file, model, **kwargs):
     """ Complete text using the specified model with appropriate API. """
     
+    openai_base_url = os.environ.get("OPENAI_BASE_URL")
+
     if model.startswith("claude"):
         # use anthropic API
+        if anthropic is None or anthropic_client is None:
+            raise LLMError("Anthropic client is not initialized.")
         completion = complete_text_claude(prompt, stop_sequences=[anthropic.HUMAN_PROMPT, "Observation:"], log_file=log_file, model=model, **kwargs)
     elif model.startswith("gemini"):
         completion = complete_text_gemini(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
@@ -272,7 +384,10 @@ def complete_text(prompt, log_file, model, **kwargs):
         completion = complete_text_hf(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
     elif "/" in model:
         # use CRFM API since this specifies organization like "openai/..."
-        completion = complete_text_crfm(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
+        if openai_base_url or not CRFM_AVAILABLE:
+            completion = complete_text_openai(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
+        else:
+            completion = complete_text_crfm(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
     else:
         # use OpenAI API
         completion = complete_text_openai(prompt, stop_sequences=["Observation:"], log_file=log_file, model=model, **kwargs)
@@ -283,4 +398,3 @@ FAST_MODEL = "claude-v1"
 def complete_text_fast(prompt, **kwargs):
     return complete_text(prompt = prompt, model = FAST_MODEL, temperature =0.01, **kwargs)
 # complete_text_fast = partial(complete_text_openai, temperature= 0.01)
-
