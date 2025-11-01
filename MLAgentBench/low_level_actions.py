@@ -77,7 +77,11 @@ def check_file_in_work_dir(arg_names, **kwargs):
             work_dir = new_kwargs["work_dir"]
             for arg_name in arg_names:
                 file_name = new_kwargs[arg_name]
-                if not os.path.abspath(os.path.join(work_dir, file_name)).startswith(os.path.abspath(work_dir)):
+                # Use normpath instead of abspath to avoid following symlinks
+                # This allows symlinks within work_dir to point outside (e.g., to /home/data)
+                normalized_path = os.path.normpath(os.path.join(work_dir, file_name))
+                normalized_work_dir = os.path.normpath(work_dir)
+                if not normalized_path.startswith(normalized_work_dir + os.sep) and normalized_path != normalized_work_dir:
                     raise EnvException(f"cannot access file {file_name} because it is not in the work directory.")
             return func(*args, **kwargs)
         return wrapper
