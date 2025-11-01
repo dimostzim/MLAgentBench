@@ -377,24 +377,6 @@ def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_t
             for segment in completion
         )
 
-    if is_openrouter and not completion:
-        responses_kwargs = {
-            "model": raw_request["model"],
-            "input": prompt,
-        }
-        if raw_request["max_tokens"]:
-            responses_kwargs["max_output_tokens"] = raw_request["max_tokens"]
-        if raw_request["stop"]:
-            responses_kwargs["stop"] = raw_request["stop"]
-        response = openai_client.responses.create(**responses_kwargs)
-        completion = getattr(response, "output_text", "") or ""
-        if not completion and hasattr(response, "output"):
-            completion = "".join(
-                getattr(chunk, "text", "")
-                for chunk in response.output
-                if getattr(chunk, "type", None) in {"message", "output_text"}
-            )
-
     if not completion:
         raise LLMError("Empty completion from model")
 
