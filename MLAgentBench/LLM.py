@@ -37,6 +37,16 @@ except Exception as e:
     anthropic_client = None
 
 
+def _get_configured_model() -> str:
+    """Return the model to use, preferring environment-provided values."""
+    return (
+        os.environ.get("OPENAI_MODEL")
+        or os.environ.get("OPENROUTER_MODEL")
+        or os.environ.get("OPENAI_DEFAULT_MODEL")
+        or "openai/gpt-5-mini"
+    )
+
+
 def _build_openai_client():
     """Initialize an OpenAI client that optionally targets an alternate base URL (e.g. OpenRouter)."""
     from openai import OpenAI  # import lazily so missing package errors surface clearly
@@ -361,6 +371,30 @@ def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_t
         )
         completion = (response.choices[0].text or "") if response.choices else ""
 
+    if isinstance(completion, list):
+        completion = "".join(
+            segment.get("text", "") if isinstance(segment, dict) else str(segment)
+            for segment in completion
+        )
+
+    if is_openrouter and not completion:
+        responses_kwargs = {
+            "model": raw_request["model"],
+            "input": prompt,
+        }
+        if raw_request["max_tokens"]:
+            responses_kwargs["max_output_tokens"] = raw_request["max_tokens"]
+        if raw_request["stop"]:
+            responses_kwargs["stop"] = raw_request["stop"]
+        response = openai_client.responses.create(**responses_kwargs)
+        completion = getattr(response, "output_text", "") or ""
+        if not completion and hasattr(response, "output"):
+            completion = "".join(
+                getattr(chunk, "text", "")
+                for chunk in response.output
+                if getattr(chunk, "type", None) in {"message", "output_text"}
+            )
+
     if not completion:
         raise LLMError("Empty completion from model")
 
@@ -394,7 +428,7 @@ def complete_text(prompt, log_file, model, **kwargs):
     return completion
 
 # specify fast models for summarization etc
-FAST_MODEL = "claude-v1"
+FAST_MODEL = _get_configured_model()
 def complete_text_fast(prompt, **kwargs):
     return complete_text(prompt = prompt, model = FAST_MODEL, temperature =0.01, **kwargs)
 # complete_text_fast = partial(complete_text_openai, temperature= 0.01)
