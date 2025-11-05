@@ -377,6 +377,13 @@ def complete_text_openai(prompt, stop_sequences=[], model="gpt-3.5-turbo", max_t
             for segment in completion
         )
 
+    # Manually enforce stop sequences if model ignored them (e.g., OpenRouter)
+    if stop_sequences and completion:
+        for stop_seq in stop_sequences:
+            if stop_seq in completion:
+                completion = completion.split(stop_seq)[0]
+                break
+
     if not completion:
         raise LLMError("Empty completion from model")
 
