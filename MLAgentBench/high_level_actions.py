@@ -213,16 +213,6 @@ Concisely summarize and list all relevant information from the research log that
 
 HIGH_LEVEL_ACTIONS =[
     ActionInfo(
-        name="Understand File",
-        description="Use this to read the whole file and understand certain aspects. You should provide detailed description on what to look for and what should be returned. To get a better understanding of the file, you can use Inspect Script Lines action to inspect specific part of the file.",
-        usage={
-            "file_name": "a valid file name with relative path to current directory if needed",
-            "things_to_look_for": "a detailed description on what to look for and what should returned"
-        },
-        return_value="The observation will be a description of relevant content and lines in the file. If the file does not exist, the observation will be an error message.",
-        function=understand_file
-    ),
-    ActionInfo(
         name="Append Summary to Research Log",
         description="Append to the summary of previous step to research log",
         usage={
