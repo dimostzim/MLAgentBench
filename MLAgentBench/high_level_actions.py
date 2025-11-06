@@ -4,9 +4,12 @@ import os
 import datetime
 import shutil
 import difflib
+from pathlib import Path
 from .low_level_actions import read_file, write_file, append_file
 from .schema import ActionInfo, EnvException
 from .LLM import complete_text_fast, complete_text
+
+MAX_BYTES_FOR_UNDERSTAND_FILE = 10_000
 
 
 def reflection( things_to_reflect_on, work_dir = ".", research_problem = "", **kwargs):
@@ -26,6 +29,19 @@ def reflection( things_to_reflect_on, work_dir = ".", research_problem = "", **k
 
 
 def understand_file( file_name, things_to_look_for, work_dir = ".", **kwargs):
+
+    target_path = Path(work_dir) / file_name
+    try:
+        file_size = target_path.stat().st_size
+    except OSError:
+        file_size = None
+
+    if file_size is not None and file_size > MAX_BYTES_FOR_UNDERSTAND_FILE:
+        return (
+            f"The file '{file_name}' is too large ({file_size} bytes) to summarize with "
+            "Understand File. Please inspect specific sections using tools like "
+            "Inspect Script Lines, List Files, or write a short script to sample the data."
+        )
 
     lines = read_file(file_name, work_dir = work_dir, **kwargs).split("\n")
     # group lines to blocks so that each block has at most 10000 characters
